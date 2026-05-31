@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kitchen Appliance Selector - Smart Version</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 font-sans min-h-screen text-gray-800">
+
+    <div class="container mx-auto py-10 px-4 max-w-7xl">
+        <div class="mb-8 flex flex-col md:flex-row justify-between items-center border-b border-gray-200 pb-6 gap-4">
+            <div class="text-center md:text-left">
+                <h1 class="text-3xl font-bold text-gray-900 tracking-tight">Kitchen Appliance Selector</h1>
+                <p class="text-gray-500 mt-1">Sistem Sinkronisasi Otomatis Google Sheets</p>
+            </div>
+            <div class="flex gap-3">
+                <button onclick="resetSesi()" class="bg-white hover:bg-gray-100 text-gray-700 border border-gray-300 px-4 py-2.5 rounded-lg font-medium shadow-sm transition text-sm">
+                    🔄 Reset Pilihan
+                </button>
+                <button onclick="window.print()" class="bg-gray-950 hover:bg-gray-800 text-white px-5 py-2.5 rounded-lg font-semibold shadow transition text-sm">
+                    📂 Cetak / Simpan PDF
+                </button>
+            </div>
+        </div>
+
+        <div id="status-panel" class="p-6 bg-white rounded-xl border border-gray-200 shadow-sm mb-6">
+            <div class="flex items-center gap-3 mb-3">
+                <div id="status-spinner" class="animate-spin inline-block w-5 h-5 border-3 border-gray-900 border-t-transparent rounded-full"></div>
+                <span id="status-title" class="font-bold text-gray-800 text-lg">Memulai Koneksi Data...</span>
+            </div>
+            <div id="debug-log" class="text-xs font-mono bg-gray-950 text-emerald-400 p-4 rounded-lg overflow-y-auto max-h-40 space-y-1 shadow-inner">
+                [SYSTEM] Menunggu inisialisasi...
+            </div>
+        </div>
+
+        <div id="table-container" class="hidden bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden transition-all">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="bg-gray-950 text-white text-xs font-medium uppercase tracking-wider">
+                            <th class="p-4 border-b border-gray-800 w-1/4">Kategori Ruang / Item</th>
+                            <th class="p-4 border-b border-gray-800 w-1/6">Kebutuhan Klien</th>
+                            <th class="p-4 border-b border-gray-800 w-1/6">Rekomendasi Merk</th>
+                            <th class="p-4 border-b border-gray-800">Detail Produk Terpilih</th>
+                            <th class="p-4 border-b border-gray-800 w-1/4">Catatan Khusus Klien</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-body" class="divide-y divide-gray-100 text-sm">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ISI ID GOOGLE SHEET & NAMA TAB ANDA
+        const SPREADSHEET_ID = '1rSPs4C0pIXefiK1mvFOSSze1L5kz9pb7mML-7Uw6XqQ';
+        const SHEET_NAME = 'DATABASE'; // Sesuai dengan nama tab data master Anda
+
+        // URL Jalur CSV (Jauh lebih aman dari CORS local file block)
+        const CSV_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
+
+        let database = {};
+        let categories = [];
+
+        function logToScreen(msg, isError = false) {
+            const logBox = document.getElementById('debug-log');
+            const color = isError ? 'text-red-400 font-bold' : 'text-emerald-400';
+            logBox.innerHTML += `<div class="${color}">> ${msg}</div>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // Jalankan Parser CSV RFC 4180 (Aman dari koma di dalam teks)
+        function parseCSV(text) {
+            let lines = [];
+            let row = [""];
+            let inQuotes = false;
+            for (let i = 0; i < text.length; i++) {
+                let c = text[i];
+                let next = text[i+1];
+                if (c === '"') {
+                    if (inQuotes && next === '"') { row[row.length - 1] += '"'; i++; }
+                    else { inQuotes = !inQuotes; }
+                } else if (c === ',' && !inQuotes) {
+                    row.push("");
+                } else if ((c === '\r' || c === '\n') && !inQuotes) {
+                    if (c === '\r' && next === '\n') { i++; }
+                    lines.push(row);
+                    row = [""];
+                } else {
+                    row[row.length - 1] += c;
+                }
+            }
+            if (row.length > 1 || row[0] !== "") lines.push(row);
+            return lines;
+        }
+
+        async function initDashboard() {
+            logToScreen("Mengirim permintaan data ke Google Server...");
+            try {
+                const res = await fetch(CSV_URL);
+                if (!res.ok) throw new Error(`Google merespon dengan kode error: ${res.status}`);
+                
+                const csvText = await res.text();
+                logToScreen(`Data mentah diterima (${csvText.length} karakter). Memulai parsing...`);
+
+                const lines = parseCSV(csvText);
+                if (lines.length <= 1) throw new Error("Google Sheet terbaca kosong atau format salah.");
+
+                // AUTO-MAPPING KOLOM BERDASARKAN JUDUL BARIS PERTAMA
+                const headers = lines[0].map(h => h.trim().toLowerCase());
+                logToScreen(`Kolom yang ditemukan di Sheet: [${headers.join(', ')}]`);
+
+                const colIdx = {
+                    category: headers.findIndex(h => h.includes('kategori') || h.includes('ruang') || h.includes('item')),
+                    brand: headers.findIndex(h => h.includes('merk') || h.includes('brand')),
+                    name: headers.findIndex(h => h.includes('nama') || h.includes('kode') || h.includes('tipe')),
+                    img: headers.findIndex(h => h.includes('gambar') || h.includes('foto') || h.includes('image')),
+                    spec: headers.findIndex(h => h.includes('spec') || h.includes('spesifikasi')),
+                    size: headers.findIndex(h => h.includes('ukuran') || h.includes('size') || h.includes('dimensi')),
+                    price: headers.findIndex(h => h.includes('harga') || h.includes('price')),
+                    link: headers.findIndex(h => h.includes('link') || h.includes('url') || h.includes('shopee'))
+                };
+
+                // Fallback default index jika judul tidak persis sama
+                if (colIdx.category === -1) colIdx.category = 0;
+                if (colIdx.brand === -1) colIdx.brand = 1;
+                if (colIdx.name === -1) colIdx.name = 2;
+                if (colIdx.img === -1) colIdx.img = 3;
+                if (colIdx.spec === -1) colIdx.spec = 4;
+                if (colIdx.size === -1) colIdx.size = 5;
+                if (colIdx.price === -1) colIdx.price = 6;
+                if (colIdx.link === -1) colIdx.link = 7;
+
+                let currentCategory = "";
+                let rowCount = 0;
+
+                for (let i = 1; i < lines.length; i++) {
+                    const row = lines[i];
+                    if (row.length <= 1) continue;
+
+                    const getCell = (idx) => (idx !== -1 && row[idx]) ? row[idx].trim() : "";
+
+                    let catVal = getCell(colIdx.category);
+                    if (catVal !== "") currentCategory = catVal;
+
+                    if (!currentCategory || currentCategory.toLowerCase().includes("kategori")) continue;
+
+                    let brand = getCell(colIdx.brand);
+                    let name = getCell(colIdx.name);
+                    
+                    if (!brand && !name) continue; // Skip baris kosong pelengkap
+
+                    let img = getCell(colIdx.img);
+                    let spec = getCell(colIdx.spec);
+                    let size = getCell(colIdx.size);
+                    let price = getCell(colIdx.price);
+                    let link = getCell(colIdx.link);
+
+                    if (!database[currentCategory]) {
+                        database[currentCategory] = [];
+                        categories.push(currentCategory);
+                    }
+
+                    database[currentCategory].push({ brand, name, img, spec, size, price, link });
+                    rowCount++;
+                }
+
+                logToScreen(`Berhasil memproses ${rowCount} produk ke dalam ${categories.length} kategori.`);
+                
+                // Matikan spinner, buka tabel
+                document.getElementById('status-spinner').classList.add('hidden');
+                document.getElementById('status-title').innerHTML = "🟢 Sinkronisasi Sukses!";
+                document.getElementById('status-panel').className = "p-4 bg-emerald-50 border border-emerald-200 rounded-xl mb-6 flex flex-col gap-2";
+                document.getElementById('table-container').classList.remove('hidden');
+
+                renderTable();
+                loadSavedData();
+
+            } catch (err) {
+                document.getElementById('status-spinner').classList.add('hidden');
+                document.getElementById('status-title').innerHTML = "⚠️ Gagal Sinkronisasi";
+                document.getElementById('status-panel').className = "p-6 bg-red-50 border border-red-200 rounded-xl mb-6";
+                logToScreen(`ERROR: ${err.message}`, true);
+                logToScreen("SOLUSI: Pastikan Google Sheet Anda sudah di-share ke 'Anyone with the link can view'. Jika Anda membuka file langsung (klik ganda .html), beberapa browser memblokirnya. Silakan upload ke Netlify Drop agar langsung lancar!", true);
+            }
+        }
+
+        function renderTable() {
+            const tableBody = document.getElementById('table-body');
+            tableBody.innerHTML = '';
+            
+            categories.forEach((category, index) => {
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-gray-50/50 transition-all text-xs md:text-sm";
+                tr.innerHTML = `
+                    <td class="p-4 font-bold text-gray-900 border-r border-gray-100 bg-gray-50/30">${category}</td>
+                    <td class="p-4 border-r border-gray-100">
+                        <select onchange="handleKebutuhanChange(${index}, '${category}')" id="kebutuhan-${index}" class="w-full border border-gray-300 rounded-lg p-2 bg-white text-gray-700 text-xs font-medium shadow-sm">
+                            <option value="">-- Pilih Status --</option>
+                            <option value="Butuh Beli Baru">Butuh Beli Baru</option>
+                            <option value="Sudah Punya">Sudah Punya</option>
+                            <option value="Tidak Butuh">Tidak Butuh</option>
+                            <option value="Pilih Sendiri">Pilih Item Sendiri</option>
+                        </select>
+                    </td>
+                    <td class="p-4 border-r border-gray-100">
+                        <select onchange="handleBrandChange(${index}, '${category}')" id="brand-${index}" disabled class="w-full border border-gray-200 rounded-lg p-2 bg-gray-50 text-gray-400 text-xs font-medium">
+                            <option value="">-- Pilih Status Dulu --</option>
+                        </select>
+                    </td>
+                    <td class="p-4 border-r border-gray-100 min-w-[260px]" id="detail-${index}">
+                        <span class="text-gray-400 italic text-xs">Belum ada item terpilih</span>
+                    </td>
+                    <td class="p-4 bg-gray-50/50">
+                        <textarea oninput="saveClientData(${index})" id="manual-input-${index}" rows="2" class="w-full border border-gray-300 rounded-lg p-2 bg-white text-gray-800 text-xs shadow-sm" placeholder="Ketik catatan spesifikasi khusus dari klien..."></textarea>
+                    </td>
+                `;
+                tableBody.appendChild(tr);
+            });
+        }
+
+        function handleKebutuhanChange(idx, category) {
+            const kebutuhanSelect = document.getElementById(`kebutuhan-${idx}`);
+            const brandSelect = document.getElementById(`brand-${idx}`);
+            const detailTd = document.getElementById(`detail-${idx}`);
+            const status = kebutuhanSelect.value;
+
+            brandSelect.innerHTML = '';
+            detailTd.innerHTML = '<span class="text-gray-400 italic text-xs">Belum ada item terpilih</span>';
+            
+            if (status === "Butuh Beli Baru") {
+                brandSelect.disabled = false;
+                brandSelect.className = "w-full border border-gray-300 rounded-lg p-2 bg-white text-gray-700 text-xs font-medium shadow-sm";
+                
+                let options = '<option value="">-- Pilih Merk --</option>';
+                if (database[category]) {
+                    const uniqueBrands = [...new Set(database[category].map(item => item.brand))].filter(b => b !== "");
+                    uniqueBrands.forEach(b => { options += `<option value="${b}">${b}</option>`; });
+                }
+                brandSelect.innerHTML = options;
+            } else if (status) {
+                brandSelect.disabled = true;
+                brandSelect.className = "w-full border border-gray-200 rounded-lg p-2 bg-gray-100 text-gray-600 text-xs font-bold";
+                brandSelect.innerHTML = `<option value="${status}">${status.toUpperCase()}</option>`;
+                detailTd.innerHTML = '<span class="text-gray-400 font-bold text-xs">-</span>';
+            } else {
+                brandSelect.disabled = true;
+                brandSelect.className = "w-full border border-gray-200 rounded-lg p-2 bg-gray-50 text-gray-400 text-xs";
+                brandSelect.innerHTML = '<option value="">-- Pilih Status Dulu --</option>';
+            }
+            saveClientData(idx);
+        }
+
+        function handleBrandChange(idx, category) {
+            const brandSelect = document.getElementById(`brand-${idx}`);
+            const detailTd = document.getElementById(`detail-${idx}`);
+            const selectedBrand = brandSelect.value;
+
+            if (!selectedBrand) {
+                detailTd.innerHTML = '<span class="text-gray-400 italic text-xs">Belum ada item terpilih</span>';
+                saveClientData(idx);
+                return;
+            }
+
+            const product = database[category].find(p => p.brand === selectedBrand);
+            if (product) {
+                // Bersihkan string jika ada sisa formula error atau teks aneh
+                const rawImg = product.img;
+                const isInvalidImg = !rawImg || rawImg.includes('#ERROR') || rawImg.includes('#N/A');
+                const imageSrc = isInvalidImg ? "https://placehold.co/100x100/e2e8f0/475569?text=No+Image" : rawImg;
+                
+                detailTd.innerHTML = `
+                    <div class="flex flex-col sm:flex-row items-start gap-3 p-1">
+                        <img src="${imageSrc}" class="w-14 h-14 rounded border border-gray-200 object-cover bg-white shadow-sm flex-shrink-0" onerror="this.src='https://placehold.co/100x100/e2e8f0/475569?text=No+Image'">
+                        <div class="space-y-0.5">
+                            <div class="font-bold text-gray-900 text-xs">${product.name || 'Tanpa Nama Tipe'}</div>
+                            <div class="text-[11px] text-gray-500"><span class="font-semibold text-gray-700">Spek:</span> ${product.spec || '-'}</div>
+                            <div class="text-[11px] text-gray-600"><span class="font-semibold text-gray-700">Dimensi:</span> ${product.size || '-'} | <span class="font-semibold text-emerald-600">Harga:</span> ${product.price || '-'}</div>
+                            ${(product.link && product.link.startsWith('http')) ? `<a href="${product.link}" target="_blank" class="inline-block text-[11px] text-blue-600 hover:underline font-medium mt-1">🌐 Buka Tautan Produk &rarr;</a>` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+            saveClientData(idx);
+        }
+
+        function saveClientData(idx) {
+            const kebutuhan = document.getElementById(`kebutuhan-${idx}`).value;
+            const brand = document.getElementById(`brand-${idx}`).value;
+            const manual = document.getElementById(`manual-input-${idx}`).value;
+            const savedData = JSON.parse(localStorage.getItem('kitchen_mem_v2') || '{}');
+            savedData[idx] = { kebutuhan, brand, manual };
+            localStorage.setItem('kitchen_mem_v2', JSON.stringify(savedData));
+        }
+
+        function loadSavedData() {
+            const savedData = JSON.parse(localStorage.getItem('kitchen_mem_v2') || '{}');
+            Object.keys(savedData).forEach(idx => {
+                const index = parseInt(idx);
+                const item = savedData[index];
+                const category = categories[index];
+                if (!category) return;
+
+                if (item.kebutuhan) {
+                    document.getElementById(`kebutuhan-${index}`).value = item.kebutuhan;
+                    handleKebutuhanChange(index, category);
+                    if (item.brand && item.kebutuhan === "Butuh Beli Baru") {
+                        document.getElementById(`brand-${index}`).value = item.brand;
+                        handleBrandChange(index, category);
+                    }
+                }
+                if (item.manual) document.getElementById(`manual-input-${index}`).value = item.manual;
+            });
+        }
+
+        function resetSesi() {
+            if (confirm("Hapus seluruh catatan diskusi dan mulai proyek baru?")) {
+                localStorage.removeItem('kitchen_mem_v2');
+                location.reload();
+            }
+        }
+
+        window.onload = initDashboard;
+    </script>
+</body>
+</html>
